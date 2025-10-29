@@ -1,0 +1,138 @@
+╔════════════════════════════════════════════════════════════════╗
+║              VMWatch - Quick Setup Guide                       ║
+╚════════════════════════════════════════════════════════════════╝
+
+STEP 1: Install Dependencies
+════════════════════════════════════════════════════════════════
+sudo apt update
+sudo apt install qemu-kvm libvirt-daemon-system libvirt-clients \
+                 bridge-utils virtinst cloud-image-utils gcc \
+                 pkg-config libvirt-dev
+
+sudo systemctl start libvirtd
+sudo systemctl enable libvirtd
+
+
+STEP 2: Create Test VM
+════════════════════════════════════════════════════════════════
+sudo ./setup.sh
+
+This will:
+  • Download Ubuntu cloud image
+  • Create VM named "example-vm"
+  • Set username: ubuntu / password: password123
+  • Configure SSH access
+  • Get VM IP address
+
+
+STEP 3: Set Up Passwordless SSH (Recommended)
+════════════════════════════════════════════════════════════════
+ssh-keygen -t rsa
+ssh-copy-id ubuntu@<VM_IP>
+
+
+STEP 4: Compile VMWatch
+════════════════════════════════════════════════════════════════
+make
+
+# Or manually:
+gcc -o vmwatch main.c $(pkg-config --cflags --libs libvirt)
+
+
+STEP 5: Run Tests
+════════════════════════════════════════════════════════════════
+# Get VM IP first
+sudo virsh domifaddr example-vm
+
+# Test with safe script (no danger)
+sudo ./vmwatch example-vm <VM_IP> ./test-safe.sh
+
+# Test with mild memory bomb (RECOMMENDED)
+sudo ./vmwatch example-vm <VM_IP> ./forkbomb-mild.sh
+
+# Test with medium memory bomb (caution)
+sudo ./vmwatch example-vm <VM_IP> ./forkbomb-medium.sh
+
+# Test with extreme fork bomb (CRASHES VM!)
+sudo ./vmwatch example-vm <VM_IP> ./forkbomb.sh
+
+
+UNDERSTANDING OUTPUT
+════════════════════════════════════════════════════════════════
+[001] Used: 245.32 MB (12.0%) | Change: +2.3%
+      ↑      ↑                    ↑
+   iteration  current RAM usage   RAM change from previous
+
+⚠️  SPIKE DETECTED! = RAM increased >30% suddenly
+
+🚨 MALICIOUS = Script shows abnormal memory consumption
+
+
+USEFUL COMMANDS
+════════════════════════════════════════════════════════════════
+# List all VMs
+sudo virsh list --all
+
+# Get VM IP
+sudo virsh domifaddr example-vm
+
+# Start VM
+sudo virsh start example-vm
+
+# Stop VM
+sudo virsh shutdown example-vm
+
+# Force stop VM
+sudo virsh destroy example-vm
+
+# Delete VM
+sudo virsh undefine example-vm --remove-all-storage
+
+# Test SSH
+ssh ubuntu@<VM_IP>
+
+
+TROUBLESHOOTING
+════════════════════════════════════════════════════════════════
+Problem: "Failed to open connection"
+Solution: sudo systemctl start libvirtd
+
+Problem: "Failed to copy script"
+Solution: Test SSH manually: ssh ubuntu@<VM_IP>
+         Set up keys: ssh-copy-id ubuntu@<VM_IP>
+
+Problem: Can't get VM IP
+Solution: sudo virsh net-dhcp-leases default
+         Or: sudo arp -n | grep virbr0
+
+Problem: VM won't start
+Solution: Check logs: sudo journalctl -u libvirtd -f
+
+
+PROJECT FILES
+════════════════════════════════════════════════════════════════
+main.c          - Main C program with malicious detection
+setup.sh        - Automated VM setup script
+test-safe.sh    - Safe test script (no harm)
+forkbomb.sh     - Fork bomb (DANGEROUS!)
+Makefile        - Build automation
+README.md       - Full documentation
+
+
+CUSTOMIZATION
+════════════════════════════════════════════════════════════════
+Change detection threshold (in main.c):
+  #define RAM_SPIKE_THRESHOLD 30.0  // Default: 30%
+
+Change monitoring time (in main.c):
+  #define MONITOR_ITERATIONS 60     // Default: 2 minutes
+
+Change VM username (in main.c):
+  const char *vm_user = "ubuntu";
+
+
+SAFETY WARNING
+════════════════════════════════════════════════════════════════
+⚠️  The fork bomb will CRASH your VM!
+   Only run in isolated test environments
+   Take VM snapshot before testing dangerous scripts

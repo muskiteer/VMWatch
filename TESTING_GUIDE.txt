@@ -1,0 +1,136 @@
+╔════════════════════════════════════════════════════════════════╗
+║              VMWatch - Testing Guide                           ║
+╚════════════════════════════════════════════════════════════════╝
+
+OVERVIEW
+════════════════════════════════════════════════════════════════
+VMWatch now includes 3 levels of malicious scripts plus 1 safe script:
+
+1. test-safe.sh       - Safe baseline test
+2. forkbomb-mild.sh   - Gradual memory increase (RECOMMENDED)
+3. forkbomb-medium.sh - Aggressive memory allocation
+4. forkbomb.sh        - Extreme fork bomb (crashes VM)
+
+
+TEST 1: SAFE SCRIPT (Baseline)
+════════════════════════════════════════════════════════════════
+Purpose: Verify VMWatch works without false positives
+
+Command:
+  sudo ./vmwatch example-vm 192.168.122.239 ./test-safe.sh
+
+Expected Result:
+  ✓ No suspicious behavior detected
+  ✓ Small memory fluctuations (<10%)
+  ✓ VM stays responsive
+
+
+TEST 2: MILD MEMORY BOMB (Recommended)
+════════════════════════════════════════════════════════════════
+Purpose: Test detection with gradual memory increase
+
+Command:
+  sudo ./vmwatch example-vm 192.168.122.239 ./forkbomb-mild.sh
+
+Expected Result:
+  ⚠️  Multiple SPIKE DETECTED warnings
+  ⚠️  Memory increases in 50MB increments
+  ⚠️  Total increase ~500MB over 30 seconds
+  🚨 MALICIOUS BEHAVIOR detected at end
+  🛑 VM automatically stopped
+
+This is the BEST test for demonstrating detection!
+
+
+TEST 3: MEDIUM MEMORY BOMB (Aggressive)
+════════════════════════════════════════════════════════════════
+Purpose: Test with heavy memory load
+
+Command:
+  sudo ./vmwatch example-vm 192.168.122.239 ./forkbomb-medium.sh
+
+Expected Result:
+  ⚠️  Rapid spike detection
+  ⚠️  Multiple processes consuming memory
+  🔴 Possible CRITICAL RAM warning (>80%)
+  🚨 VM stopped due to high memory usage
+
+Note: Requires VM with 2GB+ RAM
+
+
+TEST 4: EXTREME FORK BOMB (Crash Test)
+════════════════════════════════════════════════════════════════
+Purpose: Test VM crash detection
+
+Command:
+  sudo ./vmwatch example-vm 192.168.122.239 ./forkbomb.sh
+
+Expected Result:
+  ❌ VM crashes within 5-10 seconds
+  ❌ SSH connection failures
+  🚨 "VM CRASHED - MALICIOUS BEHAVIOR CONFIRMED!"
+  🛑 VM cleaned up automatically
+
+Note: This WILL crash the VM!
+
+
+AFTER EACH TEST
+════════════════════════════════════════════════════════════════
+Restart the VM for next test:
+
+  sudo virsh destroy example-vm
+  sudo virsh start example-vm
+  sleep 30  # Wait for boot
+
+
+WHAT TO LOOK FOR
+════════════════════════════════════════════════════════════════
+
+✓ GOOD DETECTION:
+  - Spike warnings on memory increases >30%
+  - Critical warnings when RAM >80%
+  - VM automatically stopped when malicious
+  - Crash detection working
+
+✗ FALSE POSITIVES:
+  - Spike warnings on safe script
+  - Warnings on memory decreases
+  - Huge numbers (billions) in change percentage
+
+
+TROUBLESHOOTING
+════════════════════════════════════════════════════════════════
+
+Problem: "Failed to copy script"
+Solution: Restart VM, wait 30 seconds for boot
+
+Problem: All memory shows 0.00 MB
+Solution: VM not fully booted, wait longer
+
+Problem: VM IP changed
+Solution: Run: sudo virsh domifaddr example-vm
+         Update IP in commands
+
+Problem: Huge percentage numbers
+Solution: Already fixed in latest version!
+
+
+EXAMPLE SUCCESS OUTPUT (MILD BOMB)
+════════════════════════════════════════════════════════════════
+[BASELINE] Used: 335.42 MB (17.1%)
+
+[001] Used: 340.23 MB (17.3%) | Change: +4.8 MB (+1.4%)
+[002] Used: 395.67 MB (20.2%) | Change: +55.4 MB (+16.3%)
+[003] Used: 450.12 MB (22.9%) | Change: +54.5 MB (+13.8%)
+[004] Used: 505.88 MB (25.8%) | Change: +55.8 MB (+12.4%)
+[005] Used: 560.34 MB (28.6%) | Change: +54.5 MB (+10.8%)
+[006] Used: 615.92 MB (31.4%) | Change: +55.6 MB (+9.9%)
+[007] Used: 670.45 MB (34.2%) | Change: +54.5 MB (+8.9%)
+
+🚨 WARNING: POTENTIALLY MALICIOUS BEHAVIOR! 🚨
+   - 6 RAM spike(s) detected (>30.0% increase)
+   - Abnormal memory consumption
+   - Possible fork bomb or memory attack
+
+[ACTION] Stopping VM due to malicious behavior...
+[ACTION] VM stopped successfully!
