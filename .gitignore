@@ -1,3 +1,8 @@
 bin
 *.txt
 testing
+draws
+ubuntu-*.img
+*.qcow2
+malware-*
+!malware-*.c

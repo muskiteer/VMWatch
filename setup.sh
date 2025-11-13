@@ -19,14 +19,20 @@ if sudo virsh list --all | grep -q ${VM_NAME}; then
     exit 1
 fi
 
-cd /var/lib/libvirt/images/
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+IMAGE_DIR="${SCRIPT_DIR}"
 
-# Download cloud image
-echo "[1/6] Downloading Ubuntu cloud image..."
+# Download cloud image to project directory
+echo "[1/6] Downloading Ubuntu cloud image to project directory..."
+cd "${IMAGE_DIR}"
 if [ ! -f ubuntu-22.04-server-cloudimg-amd64.img ]; then
-    sudo wget -q --show-progress https://cloud-images.ubuntu.com/releases/22.04/release/ubuntu-22.04-server-cloudimg-amd64.img
+    wget -q --show-progress https://cloud-images.ubuntu.com/releases/22.04/release/ubuntu-22.04-server-cloudimg-amd64.img
 fi
-sudo cp ubuntu-22.04-server-cloudimg-amd64.img ${VM_NAME}.qcow2
+
+# Copy to libvirt images directory
+echo "[2/6] Copying image to libvirt directory..."
+sudo cp ubuntu-22.04-server-cloudimg-amd64.img /var/lib/libvirt/images/${VM_NAME}.qcow2
 
 # Create cloud-init config
 # Generate SSH key if it doesn't exist
@@ -59,11 +65,11 @@ local-hostname: ${VM_NAME}
 EOF
 
 # Create seed image
-echo "[3/6] Creating seed image..."
+echo "[3/7] Creating seed image..."
 sudo cloud-localds /var/lib/libvirt/images/seed.img /tmp/user-data /tmp/meta-data
 
 # Create VM
-echo "[4/6] Creating virtual machine..."
+echo "[4/7] Creating virtual machine..."
 sudo virt-install \
   --name ${VM_NAME} \
   --ram 2048 \
@@ -77,11 +83,11 @@ sudo virt-install \
   --noautoconsole
 
 # Wait for VM to boot
-echo "[5/6] Waiting for VM to boot (30 seconds)..."
+echo "[5/7] Waiting for VM to boot (30 seconds)..."
 sleep 30
 
 # Get IP
-echo "[6/6] Getting VM IP address..."
+echo "[6/7] Getting VM IP address..."
 VM_IP=$(sudo virsh domifaddr ${VM_NAME} | grep -oP '(\d+\.){3}\d+' | head -1)
 
 if [ -z "$VM_IP" ]; then
@@ -111,5 +117,8 @@ else
     echo "Compile and run VMWatch:"
     echo "  gcc -o vmwatch main.c \$(pkg-config --cflags --libs libvirt)"
     echo "  sudo ./vmwatch ${VM_NAME} ${VM_IP} ./test.sh"
+    echo ""
+    echo "[7/7] Update main.c with this IP address (line 348):"
+    echo "  const char *vm_ip = \"${VM_IP}\";"
     echo ""
 fi

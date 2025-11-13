@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -6,13 +7,29 @@
 
 #define RAM_SPIKE_THRESHOLD 30.0
 #define MONITOR_ITERATIONS 60
-#define HIGH_RAM_THRESHOLD 80.0  // Stop if RAM usage exceeds 80%
+#define HIGH_RAM_THRESHOLD 80.0  
+#define SYSCALL_SPIKE_THRESHOLD 1000 
+#define NETWORK_SPIKE_THRESHOLD 1000000
 
 typedef struct {
     unsigned long long total_memory;
     unsigned long long used_memory;
     double usage_percent;
 } MemoryStats;
+
+typedef struct {
+    unsigned long long rx_bytes;
+    unsigned long long tx_bytes;
+    unsigned long long rx_packets;
+    unsigned long long tx_packets;
+} NetworkStats;
+
+typedef struct {
+    unsigned long long total_syscalls;
+    unsigned long long open_calls;
+    unsigned long long exec_calls;
+    unsigned long long fork_calls;
+} SyscallStats;
 
 int get_memory_stats_from_vm(const char *vm_ip, const char *vm_user, MemoryStats *stats) {
     char cmd[512];
@@ -45,6 +62,61 @@ int get_memory_stats_from_vm(const char *vm_ip, const char *vm_user, MemoryStats
     if (stats->total_memory > 0) {
         stats->usage_percent = (double)stats->used_memory / stats->total_memory * 100.0;
     }
+    
+    return 0;
+}
+
+int get_network_stats_from_vm(const char *vm_ip, const char *vm_user, NetworkStats *stats) {
+    char cmd[512];
+    FILE *fp;
+    const char *ssh_opts = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5";
+    
+    // Get first non-loopback interface stats from /proc/net/dev
+    snprintf(cmd, sizeof(cmd),
+             "timeout 10 ssh %s %s@%s "
+             "'cat /proc/net/dev | grep -v \"lo:\" | grep \":\" | head -1 | awk \"{print \\$2,\\$3,\\$10,\\$11}\"'",
+             ssh_opts, vm_user, vm_ip);
+    
+    fp = popen(cmd, "r");
+    if (fp == NULL) return -1;
+    
+    if (fscanf(fp, "%llu %llu %llu %llu", 
+               &stats->rx_bytes, &stats->rx_packets,
+               &stats->tx_bytes, &stats->tx_packets) != 4) {
+        pclose(fp);
+        return -1;
+    }
+    pclose(fp);
+    
+    return 0;
+}
+
+int get_syscall_stats_from_vm(const char *vm_ip, const char *vm_user, SyscallStats *stats) {
+    char cmd[512];
+    FILE *fp;
+    const char *ssh_opts = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5";
+    
+    // Count processes and estimate syscall activity
+    snprintf(cmd, sizeof(cmd),
+             "timeout 10 ssh %s %s@%s "
+             "'ps aux | wc -l; cat /proc/stat | grep \"^processes\" | awk \"{print \\$2}\"; "
+             "cat /proc/stat | grep \"^procs_running\" | awk \"{print \\$2}\"'",
+             ssh_opts, vm_user, vm_ip);
+    
+    fp = popen(cmd, "r");
+    if (fp == NULL) return -1;
+    
+    unsigned long long proc_count = 0, total_procs = 0, running_procs = 0;
+    if (fscanf(fp, "%llu %llu %llu", &proc_count, &total_procs, &running_procs) != 3) {
+        pclose(fp);
+        return -1;
+    }
+    pclose(fp);
+    
+    stats->total_syscalls = total_procs;
+    stats->fork_calls = (proc_count > 2) ? (proc_count - 2) : 0;
+    stats->exec_calls = running_procs;
+    stats->open_calls = proc_count * 3;  // Rough estimate
     
     return 0;
 }
@@ -88,8 +160,8 @@ int start_vm(const char *vm_name) {
             virConnectClose(conn);
             return -1;
         }
-        printf("[INFO] VM started! Waiting 30s...\n");
-        sleep(30);
+        printf("[INFO] VM started! Waiting 5s...\n");
+        sleep(5);
     }
 
     virDomainFree(dom);
@@ -161,20 +233,35 @@ int run_script_in_vm(const char *script_path, const char *vm_ip, const char *vm_
 int monitor_and_detect(const char *vm_name, const char *vm_ip, const char *vm_user) {
     MemoryStats stats;
     MemoryStats prev_stats = {0, 0, 0.0};
+    NetworkStats net_stats;
+    NetworkStats prev_net_stats = {0, 0, 0, 0};
+    SyscallStats syscall_stats;
+    SyscallStats prev_syscall_stats = {0, 0, 0, 0};
     int is_malicious = 0;
     int spike_count = 0;
+    int net_spike_count = 0;
+    int syscall_spike_count = 0;
     
     printf("==============================================\n");
-    printf("Starting RAM Monitoring (2 minutes)\n");
+    printf("Starting Comprehensive Monitoring (2 minutes)\n");
     printf("==============================================\n\n");
     
     if (get_memory_stats_from_vm(vm_ip, vm_user, &prev_stats) < 0) {
-        fprintf(stderr, "[ERROR] Failed to get baseline\n");
+        fprintf(stderr, "[ERROR] Failed to get baseline memory stats\n");
         return -1;
     }
     
-    printf("[BASELINE] Used: %.2f MB (%.1f%%)\n\n", 
-           prev_stats.used_memory / 1024.0, prev_stats.usage_percent);
+    if (get_network_stats_from_vm(vm_ip, vm_user, &prev_net_stats) < 0) {
+        fprintf(stderr, "[WARN] Failed to get baseline network stats\n");
+    }
+    
+    if (get_syscall_stats_from_vm(vm_ip, vm_user, &prev_syscall_stats) < 0) {
+        fprintf(stderr, "[WARN] Failed to get baseline syscall stats\n");
+    }
+    
+    printf("[BASELINE] Memory: %.2f MB (%.1f%%) | Network: RX %.2f MB | Syscalls: %llu\n\n", 
+           prev_stats.used_memory / 1024.0, prev_stats.usage_percent,
+           prev_net_stats.rx_bytes / (1024.0 * 1024.0), prev_syscall_stats.total_syscalls);
     
     int consecutive_failures = 0;
     
@@ -194,50 +281,103 @@ int monitor_and_detect(const char *vm_name, const char *vm_ip, const char *vm_us
                 printf("   - %d memory spike(s) detected before crash\n", spike_count);
                 printf("\n[ACTION] Cleaning up crashed VM...\n");
                 stop_vm(vm_name);
-                return 1;
+                printf("\n[TERMINATED] VM crash detected - Program exiting\n\n");
+                exit(EXIT_FAILURE);  // TERMINATE IMMEDIATELY
             }
             continue;
         }
         
         consecutive_failures = 0;  // Reset on success
         
-        // Calculate absolute change in MB
+        // Get network and syscall stats (non-fatal if they fail, use previous values)
+        if (get_network_stats_from_vm(vm_ip, vm_user, &net_stats) < 0) {
+            net_stats = prev_net_stats;  // Use previous values on failure
+        }
+        if (get_syscall_stats_from_vm(vm_ip, vm_user, &syscall_stats) < 0) {
+            syscall_stats = prev_syscall_stats;  // Use previous values on failure
+        }
+        
+        // Calculate memory changes
         long long mem_change_kb = (long long)stats.used_memory - (long long)prev_stats.used_memory;
         double mem_change_mb = mem_change_kb / 1024.0;
         
-        // Calculate percentage change (only if previous is significant to avoid division issues)
         double percent_change = 0.0;
         if (prev_stats.used_memory > 10240) {  // Only calculate if prev > 10MB
             percent_change = ((double)mem_change_kb / (double)prev_stats.used_memory) * 100.0;
         }
         
-        printf("[%03d] Used: %.2f MB (%.1f%%) | Change: %+.1f MB (%+.1f%%)", 
+        // Calculate network changes (bytes transferred)
+        long long net_rx_change = (long long)net_stats.rx_bytes - (long long)prev_net_stats.rx_bytes;
+        long long net_tx_change = (long long)net_stats.tx_bytes - (long long)prev_net_stats.tx_bytes;
+        
+        // Calculate syscall changes
+        long long syscall_change = (long long)syscall_stats.total_syscalls - (long long)prev_syscall_stats.total_syscalls;
+        long long fork_change = (long long)syscall_stats.fork_calls - (long long)prev_syscall_stats.fork_calls;
+        
+        // Display stats
+        printf("[%03d] RAM: %.2f MB (%.1f%%) %+.1f MB", 
                i+1, 
                stats.used_memory / 1024.0, 
                stats.usage_percent,
-               mem_change_mb,
-               percent_change);
+               mem_change_mb);
         
-        // Detect spike: only on INCREASE >30% OR >100MB sudden increase
+        printf(" | NET: RX %+.2f KB TX %+.2f KB", 
+               net_rx_change / 1024.0, net_tx_change / 1024.0);
+        
+        printf(" | SYS: %llu procs %+lld forks", 
+               syscall_stats.total_syscalls, fork_change);
+        
+        // Detect memory spike: only on INCREASE >30% OR >100MB sudden increase
         if ((percent_change > RAM_SPIKE_THRESHOLD && mem_change_kb > 0 && prev_stats.used_memory > 10240) || 
             mem_change_mb > 100.0) {
-            printf(" ⚠️  SPIKE DETECTED!");
+            printf(" ⚠️  RAM-SPIKE!");
             is_malicious = 1;
             spike_count++;
         }
         
-        // Check if RAM usage is critically high
+        // Detect network spike: >1MB/s change (>500KB in 2 seconds)
+        if (net_rx_change > NETWORK_SPIKE_THRESHOLD / 2 || net_tx_change > NETWORK_SPIKE_THRESHOLD / 2) {
+            printf(" ⚠️  NET-SPIKE!");
+            is_malicious = 1;
+            net_spike_count++;
+        }
+        
+        // Detect syscall spike: rapid fork activity (>50 forks in 2 seconds)
+        if (fork_change > 50 || syscall_change > SYSCALL_SPIKE_THRESHOLD) {
+            printf(" ⚠️  SYSCALL-SPIKE!");
+            is_malicious = 1;
+            syscall_spike_count++;
+        }
+        
+        // Check if RAM usage is critically high - IMMEDIATE TERMINATION
         if (stats.usage_percent > HIGH_RAM_THRESHOLD) {
-            printf(" 🔴 CRITICAL RAM (%.1f%%)!", stats.usage_percent);
+            printf(" 🔴 CRITICAL!");
             printf("\n\n🚨 STOPPING VM - MALICIOUS BEHAVIOR CONFIRMED! 🚨\n");
             printf("   - RAM usage exceeded %.0f%%\n", HIGH_RAM_THRESHOLD);
-            printf("   - %d spike(s) detected\n", spike_count);
+            printf("   - %d RAM spike(s), %d network spike(s), %d syscall spike(s)\n", 
+                   spike_count, net_spike_count, syscall_spike_count);
+            printf("\n[ACTION] Stopping VM and terminating...\n");
             stop_vm(vm_name);
-            return 1;
+            printf("\n[TERMINATED] Malicious file detected - Program exiting\n\n");
+            exit(EXIT_FAILURE);  // TERMINATE IMMEDIATELY
+        }
+        
+        // If we've accumulated multiple spikes, stop immediately
+        if (spike_count >= 3 || net_spike_count >= 3 || syscall_spike_count >= 3) {
+            printf("\n\n🚨 STOPPING VM - MALICIOUS BEHAVIOR CONFIRMED! 🚨\n");
+            printf("   - Multiple anomalies detected (%d RAM, %d network, %d syscall)\n", 
+                   spike_count, net_spike_count, syscall_spike_count);
+            printf("   - Sustained attack pattern identified\n");
+            printf("\n[ACTION] Stopping VM and terminating...\n");
+            stop_vm(vm_name);
+            printf("\n[TERMINATED] Malicious file detected - Program exiting\n\n");
+            exit(EXIT_FAILURE);  // TERMINATE IMMEDIATELY
         }
         
         printf("\n");
         prev_stats = stats;
+        prev_net_stats = net_stats;
+        prev_syscall_stats = syscall_stats;
     }
     
     printf("\n==============================================\n");
@@ -245,15 +385,21 @@ int monitor_and_detect(const char *vm_name, const char *vm_ip, const char *vm_us
     printf("==============================================\n");
     
     if (is_malicious) {
-        printf("\n🚨 WARNING: POTENTIALLY MALICIOUS BEHAVIOR! 🚨\n");
+        printf("\n🚨 WARNING: MALICIOUS BEHAVIOR DETECTED! 🚨\n");
         printf("   - %d RAM spike(s) detected (>%.0f%% increase)\n", spike_count, RAM_SPIKE_THRESHOLD);
-        printf("   - Abnormal memory consumption\n");
-        printf("   - Possible fork bomb or memory attack\n");
-        printf("\n[ACTION] Stopping VM due to malicious behavior...\n");
+        printf("   - %d network spike(s) detected (>%.2f MB/s)\n", net_spike_count, NETWORK_SPIKE_THRESHOLD / (1024.0 * 1024.0));
+        printf("   - %d syscall spike(s) detected (fork bombs, process spawning)\n", syscall_spike_count);
+        printf("   - Abnormal system behavior\n");
+        printf("   - Possible fork bomb, memory attack, or data exfiltration\n");
+        printf("\n[ACTION] Stopping VM and terminating...\n");
         stop_vm(vm_name);
-        return 1;
+        printf("\n[TERMINATED] Malicious file detected - Program exiting\n\n");
+        exit(EXIT_FAILURE);  // TERMINATE IMMEDIATELY
     } else {
         printf("\n✓ No suspicious behavior detected\n");
+        printf("   - Memory usage remained stable\n");
+        printf("   - Network activity was normal\n");
+        printf("   - Syscall activity was normal\n");
         return 0;
     }
 }
